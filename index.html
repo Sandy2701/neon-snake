@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Neon Snake - Multiplayer Edition</title>
+    <title>Neon Snake - Real Online Multiplayer</title>
     <style>
         body {
             background-color: #121214;
@@ -24,6 +24,14 @@
             margin-bottom: 5px;
         }
 
+        #status {
+            font-size: 20px;
+            color: #ffff00;
+            margin-bottom: 15px;
+            font-weight: bold;
+            text-shadow: 0 0 8px #ffff00;
+        }
+
         .scoreboard {
             display: flex;
             gap: 40px;
@@ -42,19 +50,21 @@
             border-radius: 8px;
         }
 
-        .controls-container {
-            display: flex;
-            gap: 50px;
+        .controls {
             margin-top: 15px;
             color: #aaa;
-            font-size: 13px;
+            font-size: 14px;
             text-align: center;
         }
     </style>
+
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 </head>
 <body>
 
-    <h1>NEON SNAKE: VS MODE</h1>
+    <h1>ONLINE NEON SNAKE</h1>
+    <div id="status">Connecting to matchmaking server...</div>
     
     <div class="scoreboard">
         <div class="p1-score">P1 (Blue): <span id="p1Score">0</span></div>
@@ -63,46 +73,92 @@
     
     <canvas id="gameCanvas" width="500" height="500"></canvas>
 
-    <div class="controls-container">
-        <div><b>Player 1 (Blue):</b><br>Use Arrow Keys</div>
-        <div><b>Player 2 (Pink):</b><br>Use W, A, S, D Keys</div>
+    <div class="controls">
+        Use your <b>Keyboard Arrow Keys</b> to steer your snake!
     </div>
 
     <script>
+        // --- FIREBASE CONFIGURATION ---
+        // A free public sandbox database for testing
+        const firebaseConfig = {
+            databaseURL: "https://neon-snake-multiplayer-default-rtdb.firebaseio.com/"
+        };
+        
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+        const gameRef = db.ref("shared_game_room");
+
         const canvas = document.getElementById("gameCanvas");
         const ctx = canvas.getContext("2d");
-
         const gridSize = 20;
         const tileCount = canvas.width / gridSize;
 
-        // Player 1 State (Blue)
-        let snake1 = [{x: 5, y: 12}];
-        let xVel1 = 1;
-        let yVel1 = 0;
-        let score1 = 0;
+        let myPlayerId = null; 
+        let gameState = {};
+        let localXVel = 0;
+        let localYVel = 0;
 
-        // Player 2 State (Pink)
-        let snake2 = [{x: 20, y: 12}];
-        let xVel2 = -1;
-        let yVel2 = 0;
-        let score2 = 0;
+        // Step 1: Join the Online Room
+        gameRef.once("value", (snapshot) => {
+            let data = snapshot.val();
+            
+            if (!data || !data.p1) {
+                myPlayerId = "p1";
+                document.getElementById("status").innerText = "You are Player 1 (Blue). Waiting for Player 2...";
+                // Setup Player 1 Initial State
+                gameRef.child("p1").set({ snake: [{x: 5, y: 12}], xVel: 1, yVel: 0, score: 0 });
+                localXVel = 1; localYVel = 0;
+            } else if (!data.p2) {
+                myPlayerId = "p2";
+                document.getElementById("status").innerText = "You are Player 2 (Pink). Starting game!";
+                // Setup Player 2 Initial State
+                gameRef.child("p2").set({ snake: [{x: 20, y: 12}], xVel: -1, yVel: 0, score: 0 });
+                gameRef.child("food").set({x: 12, y: 12});
+                gameRef.child("active").set(true);
+                localXVel = -1; localYVel = 0;
+            } else {
+                document.getElementById("status").innerText = "Room full! Spectating current match...";
+                myPlayerId = "spectator";
+            }
+        });
 
-        let food = {x: 12, y: 12};
-        let gameSpeed = 110;
+        // Clear room data when you close the tab
+        window.addEventListener("beforeunload", () => {
+            if (myPlayerId && myPlayerId !== "spectator") {
+                gameRef.child(myPlayerId).remove();
+                gameRef.child("active").set(false);
+            }
+        });
 
-        function main() {
-            let gameOverReason = checkCollisions();
-            if (gameOverReason) {
-                alert(gameOverReason);
-                resetGame();
+        // Step 2: Listen for online movements from the server
+        gameRef.on("value", (snapshot) => {
+            gameState = snapshot.val() || {};
+            
+            if (gameState.active && gameState.p1 && gameState.p2) {
+                document.getElementById("status").innerText = "🔴 LIVE MATCH ONLINE";
+                document.getElementById("p1Score").innerText = gameState.p1.score || 0;
+                document.getElementById("p2Score").innerText = gameState.p2.score || 0;
+            }
+        });
+
+        // Step 3: Game Loop Engine
+        function gameLoop() {
+            if (!gameState.active || !gameState.p1 || !gameState.p2) {
+                // Keep rendering screen blank/waiting state if player 2 hasn't joined
+                clearCanvas();
+                if (gameState.p1) drawSnake(gameState.p1.snake, "#00ffcc", "#00b3ff");
                 return;
             }
 
             clearCanvas();
-            moveSnakes();
             drawFood();
-            drawSnake(snake1, "#00ffcc", "#00b3ff"); // P1 Colors
-            drawSnake(snake2, "#ff007f", "#ff66b2"); // P2 Colors
+            drawSnake(gameState.p1.snake, "#00ffcc", "#00b3ff");
+            drawSnake(gameState.p2.snake, "#ff007f", "#ff66b2");
+
+            // Only the leader (Player 1) calculates logic positions to prevent lag desync
+            if (myPlayerId === "p1") {
+                updateServerPhysics();
+            }
         }
 
         function clearCanvas() {
@@ -111,6 +167,7 @@
         }
 
         function drawSnake(snake, headColor, bodyColor) {
+            if (!snake) return;
             snake.forEach((part, index) => {
                 ctx.fillStyle = index === 0 ? headColor : bodyColor;
                 ctx.shadowBlur = 8;
@@ -120,106 +177,72 @@
             ctx.shadowBlur = 0;
         }
 
-        function moveSnakes() {
-            // Move Player 1
-            const head1 = {x: snake1[0].x + xVel1, y: snake1[0].y + yVel1};
-            snake1.unshift(head1);
-            if (head1.x === food.x && head1.y === food.y) {
-                score1 += 10;
-                document.getElementById("p1Score").innerText = score1;
-                generateFood();
-            } else {
-                snake1.pop();
-            }
-
-            // Move Player 2
-            const head2 = {x: snake2[0].x + xVel2, y: snake2[0].y + yVel2};
-            snake2.unshift(head2);
-            if (head2.x === food.x && head2.y === food.y) {
-                score2 += 10;
-                document.getElementById("p2Score").innerText = score2;
-                generateFood();
-            } else {
-                snake2.pop();
-            }
-        }
-
         function drawFood() {
-            ctx.fillStyle = "#ffff00"; // Yellow food for visibility
+            if (!gameState.food) return;
+            ctx.fillStyle = "#ffff00";
             ctx.shadowBlur = 12;
             ctx.shadowColor = "#ffff00";
             ctx.beginPath();
             let radius = (gridSize / 2) - 1;
-            ctx.arc((food.x * gridSize) + radius, (food.y * gridSize) + radius, radius, 0, 2 * Math.PI);
+            ctx.arc((gameState.food.x * gridSize) + radius, (gameState.food.y * gridSize) + radius, radius, 0, 2 * Math.PI);
             ctx.fill();
             ctx.shadowBlur = 0;
         }
 
-        function generateFood() {
-            food.x = Math.floor(Math.random() * tileCount);
-            food.y = Math.floor(Math.random() * tileCount);
+        function updateServerPhysics() {
+            let p1 = gameState.p1;
+            let p2 = gameState.p2;
+            let food = gameState.food;
+
+            // Compute next head positions
+            const h1 = {x: p1.snake[0].x + p1.xVel, y: p1.snake[0].y + p1.yVel};
+            const h2 = {x: p2.snake[0].x + p2.xVel, y: p2.snake[0].y + p2.yVel};
+
+            p1.snake.unshift(h1);
+            p2.snake.unshift(h2);
+
+            // Check Food Eating
+            if (h1.x === food.x && h1.y === food.y) { p1.score += 10; food = {x: Math.floor(Math.random()*tileCount), y: Math.floor(Math.random()*tileCount)}; } else { p1.snake.pop(); }
+            if (h2.x === food.x && h2.y === food.y) { p2.score += 10; food = {x: Math.floor(Math.random()*tileCount), y: Math.floor(Math.random()*tileCount)}; } else { p2.snake.pop(); }
+
+            // Check Collisions / Game Over
+            if (h1.x < 0 || h1.x >= tileCount || h1.y < 0 || h1.y >= tileCount || h2.x < 0 || h2.x >= tileCount || h2.y < 0 || h2.y >= tileCount) {
+                resetOnlineRoom();
+                return;
+            }
+
+            // Sync all data back to the clouds
+            gameRef.child("p1/snake").set(p1.snake);
+            gameRef.child("p2/snake").set(p2.snake);
+            gameRef.child("p1/score").set(p1.score);
+            gameRef.child("p2/score").set(p2.score);
+            gameRef.child("food").set(food);
         }
 
-        function checkCollisions() {
-            const h1 = snake1[0];
-            const h2 = snake2[0];
-
-            // Wall Collisions
-            if (h1.x < 0 || h1.x >= tileCount || h1.y < 0 || h1.y >= tileCount) return "Player 2 Wins! Player 1 hit a wall.";
-            if (h2.x < 0 || h2.x >= tileCount || h2.y < 0 || h2.y >= tileCount) return "Player 1 Wins! Player 2 hit a wall.";
-
-            // Head to Head Collision
-            if (h1.x === h2.x && h1.y === h2.y) return "It's a Tie! Simultaneous head-on collision.";
-
-            // Player 1 hitting themselves or Player 2
-            for (let i = 1; i < snake1.length; i++) {
-                if (h1.x === snake1[i].x && h1.y === snake1[i].y) return "Player 2 Wins! Player 1 hit themselves.";
-            }
-            for (let i = 0; i < snake2.length; i++) {
-                if (h1.x === snake2[i].x && h1.y === snake2[i].y) return "Player 2 Wins! Player 1 crashed into Player 2.";
-            }
-
-            // Player 2 hitting themselves or Player 1
-            for (let i = 1; i < snake2.length; i++) {
-                if (h2.x === snake2[i].x && h2.y === snake2[i].y) return "Player 1 Wins! Player 2 hit themselves.";
-            }
-            for (let i = 0; i < snake1.length; i++) {
-                if (h2.x === snake1[i].x && h2.y === snake1[i].y) return "Player 1 Wins! Player 2 crashed into Player 1.";
-            }
-
-            return null;
+        function resetOnlineRoom() {
+            alert("Game Over! Match resetting.");
+            gameRef.set({
+                p1: { snake: [{x: 5, y: 12}], xVel: 1, yVel: 0, score: 0 },
+                p2: { snake: [{x: 20, y: 12}], xVel: -1, yVel: 0, score: 0 },
+                food: {x: 12, y: 12},
+                active: true
+            });
         }
 
-        function resetGame() {
-            snake1 = [{x: 5, y: 12}];
-            xVel1 = 1; yVel1 = 0;
-            score1 = 0;
-
-            snake2 = [{x: 20, y: 12}];
-            xVel2 = -1; yVel2 = 0;
-            score2 = 0;
-
-            document.getElementById("p1Score").innerText = 0;
-            document.getElementById("p2Score").innerText = 0;
-            generateFood();
-        }
-
-        // Key Listeners for both players
+        // Send arrow key inputs immediately to the online database
         document.addEventListener("keydown", (e) => {
-            // Player 1 (Arrows)
-            if (e.key === "ArrowLeft" && xVel1 !== 1)  { xVel1 = -1; yVel1 = 0; }
-            if (e.key === "ArrowUp" && yVel1 !== 1)    { xVel1 = 0;  yVel1 = -1; }
-            if (e.key === "ArrowRight" && xVel1 !== -1) { xVel1 = 1;  yVel1 = 0; }
-            if (e.key === "ArrowDown" && yVel1 !== -1)  { xVel1 = 0;  yVel1 = 1; }
+            if (!myPlayerId || myPlayerId === "spectator") return;
 
-            // Player 2 (WASD)
-            if ((e.key === "a" || e.key === "A") && xVel2 !== 1)  { xVel2 = -1; yVel2 = 0; }
-            if ((e.key === "w" || e.key === "W") && yVel2 !== 1)  { xVel2 = 0;  yVel2 = -1; }
-            if ((e.key === "d" || e.key === "D") && xVel2 !== -1) { xVel2 = 1;  yVel2 = 0; }
-            if ((e.key === "s" || e.key === "S") && yVel2 !== -1)  { xVel2 = 0;  yVel2 = 1; }
+            let currentVel = myPlayerId === "p1" ? gameState.p1 : gameState.p2;
+            if (!currentVel) return;
+
+            if (e.key === "ArrowLeft" && currentVel.xVel !== 1)  gameRef.child(`${myPlayerId}`).update({xVel: -1, yVel: 0});
+            if (e.key === "ArrowUp" && currentVel.yVel !== 1)    gameRef.child(`${myPlayerId}`).update({xVel: 0, yVel: -1});
+            if (e.key === "ArrowRight" && currentVel.xVel !== -1) gameRef.child(`${myPlayerId}`).update({xVel: 1, yVel: 0});
+            if (e.key === "ArrowDown" && currentVel.yVel !== -1)  gameRef.child(`${myPlayerId}`).update({xVel: 0, yVel: 1});
         });
 
-        setInterval(main, gameSpeed);
+        setInterval(gameLoop, 120);
     </script>
 </body>
 </html>
