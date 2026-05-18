@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Neon Snake - Real Online Multiplayer</title>
+    <title>Neon Snake - Turbo Edition</title>
     <style>
+        /* Modern, attractive dark arcade theme */
         body {
             background-color: #121214;
             color: #ffffff;
@@ -24,25 +25,25 @@
             margin-bottom: 5px;
         }
 
-        #status {
+        .stats-container {
+            display: flex;
+            gap: 30px;
             font-size: 20px;
-            color: #ffff00;
             margin-bottom: 15px;
             font-weight: bold;
+        }
+
+        #scoreLabel {
+            color: #ff007f;
+            text-shadow: 0 0 8px #ff007f;
+        }
+
+        #speedLabel {
+            color: #ffff00;
             text-shadow: 0 0 8px #ffff00;
         }
 
-        .scoreboard {
-            display: flex;
-            gap: 40px;
-            font-size: 22px;
-            font-weight: bold;
-            margin-bottom: 15px;
-        }
-
-        .p1-score { color: #00b3ff; text-shadow: 0 0 8px #00b3ff; }
-        .p2-score { color: #ff007f; text-shadow: 0 0 8px #ff007f; }
-
+        /* The Game Board */
         canvas {
             background-color: #1a1a1e;
             border: 4px solid #00ffcc;
@@ -50,199 +51,196 @@
             border-radius: 8px;
         }
 
-        .controls {
+        .instructions {
             margin-top: 15px;
-            color: #aaa;
+            color: #888;
             font-size: 14px;
             text-align: center;
         }
     </style>
-
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 </head>
 <body>
 
-    <h1>ONLINE NEON SNAKE</h1>
-    <div id="status">Connecting to matchmaking server...</div>
+    <h1>NEON SNAKE: TURBO</h1>
     
-    <div class="scoreboard">
-        <div class="p1-score">P1 (Blue): <span id="p1Score">0</span></div>
-        <div class="p2-score">P2 (Pink): <span id="p2Score">0</span></div>
+    <div class="stats-container">
+        <div id="scoreLabel">Score: <span id="score">0</span></div>
+        <div id="speedLabel">Speed: <span id="speedLevel">1</span>x</div>
     </div>
     
-    <canvas id="gameCanvas" width="500" height="500"></canvas>
+    <canvas id="gameCanvas" width="400" height="400"></canvas>
 
-    <div class="controls">
-        Use your <b>Keyboard Arrow Keys</b> to steer your snake!
+    <div class="instructions">
+        Use your <b>Arrow Keys</b> to Move.<br>
+        Watch out! It gets faster every time you eat!
     </div>
 
     <script>
-        // --- FIREBASE CONFIGURATION ---
-        // A free public sandbox database for testing
-        const firebaseConfig = {
-            databaseURL: "https://neon-snake-multiplayer-default-rtdb.firebaseio.com/"
-        };
-        
-        firebase.initializeApp(firebaseConfig);
-        const db = firebase.database();
-        const gameRef = db.ref("shared_game_room");
-
         const canvas = document.getElementById("gameCanvas");
         const ctx = canvas.getContext("2d");
+
+        // Grid configuration
         const gridSize = 20;
         const tileCount = canvas.width / gridSize;
 
-        let myPlayerId = null; 
-        let gameState = {};
-        let localXVel = 0;
-        let localYVel = 0;
+        // Game Variables
+        let snake = [{x: 10, y: 10}]; 
+        let food = {x: 5, y: 5};
+        let xVelocity = 0;
+        let yVelocity = 0;
+        let score = 0;
+        
+        let baseSpeed = 120; // Starting interval time in milliseconds
+        let currentSpeed = baseSpeed;
+        let speedLevel = 1;
+        let gameTimeout;
 
-        // Step 1: Join the Online Room
-        gameRef.once("value", (snapshot) => {
-            let data = snapshot.val();
-            
-            if (!data || !data.p1) {
-                myPlayerId = "p1";
-                document.getElementById("status").innerText = "You are Player 1 (Blue). Waiting for Player 2...";
-                // Setup Player 1 Initial State
-                gameRef.child("p1").set({ snake: [{x: 5, y: 12}], xVel: 1, yVel: 0, score: 0 });
-                localXVel = 1; localYVel = 0;
-            } else if (!data.p2) {
-                myPlayerId = "p2";
-                document.getElementById("status").innerText = "You are Player 2 (Pink). Starting game!";
-                // Setup Player 2 Initial State
-                gameRef.child("p2").set({ snake: [{x: 20, y: 12}], xVel: -1, yVel: 0, score: 0 });
-                gameRef.child("food").set({x: 12, y: 12});
-                gameRef.child("active").set(true);
-                localXVel = -1; localYVel = 0;
-            } else {
-                document.getElementById("status").innerText = "Room full! Spectating current match...";
-                myPlayerId = "spectator";
-            }
-        });
-
-        // Clear room data when you close the tab
-        window.addEventListener("beforeunload", () => {
-            if (myPlayerId && myPlayerId !== "spectator") {
-                gameRef.child(myPlayerId).remove();
-                gameRef.child("active").set(false);
-            }
-        });
-
-        // Step 2: Listen for online movements from the server
-        gameRef.on("value", (snapshot) => {
-            gameState = snapshot.val() || {};
-            
-            if (gameState.active && gameState.p1 && gameState.p2) {
-                document.getElementById("status").innerText = "🔴 LIVE MATCH ONLINE";
-                document.getElementById("p1Score").innerText = gameState.p1.score || 0;
-                document.getElementById("p2Score").innerText = gameState.p2.score || 0;
-            }
-        });
-
-        // Step 3: Game Loop Engine
-        function gameLoop() {
-            if (!gameState.active || !gameState.p1 || !gameState.p2) {
-                // Keep rendering screen blank/waiting state if player 2 hasn't joined
-                clearCanvas();
-                if (gameState.p1) drawSnake(gameState.p1.snake, "#00ffcc", "#00b3ff");
+        // Main game loop control using setTimeout for dynamic speed adjustments
+        function main() {
+            if (hasGameEnded()) {
+                alert("Game Over! Your final score was: " + score);
+                resetGame();
                 return;
             }
 
             clearCanvas();
+            moveSnake();
             drawFood();
-            drawSnake(gameState.p1.snake, "#00ffcc", "#00b3ff");
-            drawSnake(gameState.p2.snake, "#ff007f", "#ff66b2");
+            drawSnake();
 
-            // Only the leader (Player 1) calculates logic positions to prevent lag desync
-            if (myPlayerId === "p1") {
-                updateServerPhysics();
-            }
+            // Loops the game dynamically based on current speed
+            gameTimeout = setTimeout(main, currentSpeed);
         }
 
+        // 1. Clear Canvas every frame
         function clearCanvas() {
             ctx.fillStyle = "#1a1a1e";
             ctx.fillRect(0, 0, canvas.width, canvas.height);
         }
 
-        function drawSnake(snake, headColor, bodyColor) {
-            if (!snake) return;
+        // 2. Draw the Snake with a glowing neon effect
+        function drawSnake() {
             snake.forEach((part, index) => {
-                ctx.fillStyle = index === 0 ? headColor : bodyColor;
-                ctx.shadowBlur = 8;
-                ctx.shadowColor = headColor;
+                ctx.fillStyle = index === 0 ? "#00ffcc" : "#00b3ff";
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = "#00ffcc";
                 ctx.fillRect(part.x * gridSize, part.y * gridSize, gridSize - 2, gridSize - 2);
             });
-            ctx.shadowBlur = 0;
+            ctx.shadowBlur = 0; 
         }
 
+        // 3. Move the snake forward
+        function moveSnake() {
+            const head = {x: snake[0].x + xVelocity, y: snake[0].y + yVelocity};
+            snake.unshift(head); 
+
+            // Check if snake ate the food
+            if (snake[0].x === food.x && snake[0].y === food.y) {
+                score += 10;
+                document.getElementById("score").innerText = score;
+                
+                // Increase speed difficulty level
+                if (currentSpeed > 40) { 
+                    currentSpeed -= 6; // Decreasing the delay makes it run faster
+                    speedLevel += 1;
+                    document.getElementById("speedLevel").innerText = speedLevel;
+                }
+                
+                generateFood();
+            } else {
+                snake.pop(); 
+            }
+        }
+
+        // 4. Draw Food (Neon Pink/Red)
         function drawFood() {
-            if (!gameState.food) return;
-            ctx.fillStyle = "#ffff00";
+            ctx.fillStyle = "#ff007f";
             ctx.shadowBlur = 12;
-            ctx.shadowColor = "#ffff00";
+            ctx.shadowColor = "#ff007f";
             ctx.beginPath();
             let radius = (gridSize / 2) - 1;
-            ctx.arc((gameState.food.x * gridSize) + radius, (gameState.food.y * gridSize) + radius, radius, 0, 2 * Math.PI);
+            ctx.arc((food.x * gridSize) + radius, (food.y * gridSize) + radius, radius, 0, 2 * Math.PI);
             ctx.fill();
-            ctx.shadowBlur = 0;
+            ctx.shadowBlur = 0; 
         }
 
-        function updateServerPhysics() {
-            let p1 = gameState.p1;
-            let p2 = gameState.p2;
-            let food = gameState.food;
+        // 5. Spawn food randomly on the grid
+        function generateFood() {
+            food.x = Math.floor(Math.random() * tileCount);
+            food.y = Math.floor(Math.random() * tileCount);
 
-            // Compute next head positions
-            const h1 = {x: p1.snake[0].x + p1.xVel, y: p1.snake[0].y + p1.yVel};
-            const h2 = {x: p2.snake[0].x + p2.xVel, y: p2.snake[0].y + p2.yVel};
-
-            p1.snake.unshift(h1);
-            p2.snake.unshift(h2);
-
-            // Check Food Eating
-            if (h1.x === food.x && h1.y === food.y) { p1.score += 10; food = {x: Math.floor(Math.random()*tileCount), y: Math.floor(Math.random()*tileCount)}; } else { p1.snake.pop(); }
-            if (h2.x === food.x && h2.y === food.y) { p2.score += 10; food = {x: Math.floor(Math.random()*tileCount), y: Math.floor(Math.random()*tileCount)}; } else { p2.snake.pop(); }
-
-            // Check Collisions / Game Over
-            if (h1.x < 0 || h1.x >= tileCount || h1.y < 0 || h1.y >= tileCount || h2.x < 0 || h2.x >= tileCount || h2.y < 0 || h2.y >= tileCount) {
-                resetOnlineRoom();
-                return;
-            }
-
-            // Sync all data back to the clouds
-            gameRef.child("p1/snake").set(p1.snake);
-            gameRef.child("p2/snake").set(p2.snake);
-            gameRef.child("p1/score").set(p1.score);
-            gameRef.child("p2/score").set(p2.score);
-            gameRef.child("food").set(food);
-        }
-
-        function resetOnlineRoom() {
-            alert("Game Over! Match resetting.");
-            gameRef.set({
-                p1: { snake: [{x: 5, y: 12}], xVel: 1, yVel: 0, score: 0 },
-                p2: { snake: [{x: 20, y: 12}], xVel: -1, yVel: 0, score: 0 },
-                food: {x: 12, y: 12},
-                active: true
+            // Make sure food doesn't spawn on top of the snake
+            snake.forEach(part => {
+                if (part.x === food.x && part.y === food.y) generateFood();
             });
         }
 
-        // Send arrow key inputs immediately to the online database
-        document.addEventListener("keydown", (e) => {
-            if (!myPlayerId || myPlayerId === "spectator") return;
+        // 6. Check for collisions (Walls or Self)
+        function hasGameEnded() {
+            // Self collision check
+            for (let i = 4; i < snake.length; i++) {
+                if (snake[i].x === snake[0].x && snake[i].y === snake[0].y) return true;
+            }
+            // Wall collision check
+            const hitLeftWall = snake[0].x < 0;
+            const hitRightWall = snake[0].x >= tileCount;
+            const hitTopWall = snake[0].y < 0;
+            const hitBottomWall = snake[0].y >= tileCount;
 
-            let currentVel = myPlayerId === "p1" ? gameState.p1 : gameState.p2;
-            if (!currentVel) return;
+            return hitLeftWall || hitRightWall || hitTopWall || hitBottomWall;
+        }
 
-            if (e.key === "ArrowLeft" && currentVel.xVel !== 1)  gameRef.child(`${myPlayerId}`).update({xVel: -1, yVel: 0});
-            if (e.key === "ArrowUp" && currentVel.yVel !== 1)    gameRef.child(`${myPlayerId}`).update({xVel: 0, yVel: -1});
-            if (e.key === "ArrowRight" && currentVel.xVel !== -1) gameRef.child(`${myPlayerId}`).update({xVel: 1, yVel: 0});
-            if (e.key === "ArrowDown" && currentVel.yVel !== -1)  gameRef.child(`${myPlayerId}`).update({xVel: 0, yVel: 1});
-        });
+        // 7. Reset Game State
+        function resetGame() {
+            clearTimeout(gameTimeout);
+            snake = [{x: 10, y: 10}];
+            xVelocity = 0;
+            yVelocity = 0;
+            score = 0;
+            currentSpeed = baseSpeed;
+            speedLevel = 1;
+            document.getElementById("score").innerText = score;
+            document.getElementById("speedLevel").innerText = speedLevel;
+            generateFood();
+            main();
+        }
 
-        setInterval(gameLoop, 120);
+        // 8. Capture Keyboard Inputs (Arrow Keys)
+        document.addEventListener("keydown", changeDirection);
+
+        function changeDirection(event) {
+            const keyPressed = event.keyCode;
+            const LEFT = 37;
+            const UP = 38;
+            const RIGHT = 39;
+            const DOWN = 40;
+
+            const goingUp = yVelocity === -1;
+            const goingDown = yVelocity === 1;
+            const goingRight = xVelocity === 1;
+            const goingLeft = xVelocity === -1;
+
+            if (keyPressed === LEFT && !goingRight) {
+                xVelocity = -1;
+                yVelocity = 0;
+            }
+            if (keyPressed === UP && !goingDown) {
+                xVelocity = 0;
+                yVelocity = -1;
+            }
+            if (keyPressed === RIGHT && !goingLeft) {
+                xVelocity = 1;
+                yVelocity = 0;
+            }
+            if (keyPressed === DOWN && !goingUp) {
+                xVelocity = 0;
+                yVelocity = 1;
+            }
+        }
+
+        // Start the game loop
+        generateFood();
+        main();
     </script>
 </body>
 </html>
